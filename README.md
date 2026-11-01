@@ -27,6 +27,7 @@ The checks simulate playback/reconnection, prebuffering, remembered themes and a
 - Collapsible recent playlist, 200 stored plays, and 300 artwork references.
 - Two-second metadata refresh and buffer-aware deferred artwork changes.
 - Page never scrolls; only the playlist contents may scroll. Reduced motion is respected.
+- Visualizer rendering stops while paused or hidden, reuses its gradient, and caps canvas pixel density at 2x. Closed playlists release their rows and images; artwork preloads are cleaned up when superseded. Pending artwork retains one transition while paused and at most 20 during long stalls, without changing the audio stream.
 
 ## Sources and limits
 

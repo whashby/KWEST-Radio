@@ -226,21 +226,30 @@ try {
     if (Array.isArray(entry) && typeof entry[0] === 'string' && typeof entry[1] === 'string') knownArtwork.set(entry[0], entry[1]);
   }
 } catch { /* Saved covers are optional; source metadata remains authoritative. */ }
-let pendingArtwork = '';
+let pendingArtwork = '', pendingImage = null;
+function clearArtworkPreload() {
+  if (pendingImage) {
+    pendingImage.onload = pendingImage.onerror = null;
+    pendingImage.removeAttribute('src');
+    pendingImage = null;
+  }
+  pendingArtwork = '';
+}
 function preloadArtwork(url) {
   if (!url) return;
-  if (url === artwork.src) { pendingArtwork = ''; return; }
+  if (url === artwork.src) { clearArtworkPreload(); return; }
   if (url === pendingArtwork) return;
+  clearArtworkPreload();
   pendingArtwork = url;
-  const image = new Image();
+  const image = pendingImage = new Image();
   image.onload = () => {
-    if (pendingArtwork !== url) return;
+    if (pendingImage !== image) return;
     artwork.src = url;
-    pendingArtwork = '';
+    clearArtworkPreload();
   };
   image.onerror = () => {
-    if (pendingArtwork !== url) return;
-    pendingArtwork = '';
+    if (pendingImage !== image) return;
+    clearArtworkPreload();
     if (artwork.hidden) hideArtwork('Album artwork unavailable.');
   };
   image.src = url;
@@ -290,8 +299,8 @@ function updateHistory(data) {
   if (image) {
     knownArtwork.delete(nextCurrent.title);
     knownArtwork.set(nextCurrent.title, image);
-    while (knownArtwork.size > 300) knownArtwork.delete(knownArtwork.keys().next().value);
   }
+  while (knownArtwork.size > 300) knownArtwork.delete(knownArtwork.keys().next().value);
   if (currentTrack && trackKey(currentTrack) !== trackKey(nextCurrent)) recentTracks.unshift(currentTrack);
   currentTrack = nextCurrent;
   const combined = [...recentTracks, ...(Array.isArray(data.history) ? data.history : [])];
@@ -314,10 +323,9 @@ function updateHistory(data) {
     }))));
     localStorage.setItem('kwest-artwork', JSON.stringify([...knownArtwork]));
   } catch { /* Playback and metadata continue when browser storage is unavailable. */ }
-  for (const track of recentTracks.slice(0, 3)) {
-    const cover = artworkURL(track);
-    if (cover) { const image = new Image(); image.src = cover; }
-  }
+  if (document.querySelector('.recent').open) renderHistory();
+}
+function renderHistory() {
   const list = document.querySelector('#history');
   list.replaceChildren();
   if (!recentTracks.length) {
@@ -338,6 +346,10 @@ function updateHistory(data) {
     list.append(item);
   }
 }
+document.querySelector('.recent').addEventListener('toggle', () => {
+  if (document.querySelector('.recent').open) renderHistory();
+  else document.querySelector('#history').replaceChildren();
+});
 let updatingTrack = false;
 let pendingTracks = [];
 function displayTrack(data) {
@@ -345,7 +357,7 @@ function displayTrack(data) {
   const track = data.current_track;
   document.querySelector('.subtitle').textContent = track?.title || 'Tune in. Turn it up.';
   const image = artworkURL(track);
-  if (!image) { pendingArtwork = ''; hideArtwork('No album artwork supplied by the station.'); return; }
+  if (!image) { clearArtworkPreload(); hideArtwork('No album artwork supplied by the station.'); return; }
   preloadArtwork(image);
 }
 function syncTrack(data) {
@@ -366,9 +378,12 @@ function syncTrack(data) {
   const age = Number.isFinite(started) ? Math.max(0, (Date.now() - started) / 1000) : 0;
   // shortcut: public metadata has no stream timestamps; estimate transport lag until timed metadata is available.
   const delay = Math.max(0, ahead + 2 - age);
+  if (audio.paused) pendingTracks = [];
   pendingTracks.push({ data, at: audio.currentTime + delay });
+  // shortcut: retain the latest 20 transitions during long stalls; timed stream metadata would avoid this queue.
+  if (pendingTracks.length > 20) pendingTracks.shift();
   const image = artworkURL(track);
-  if (image) { const preload = new Image(); preload.src = image; }
+  if (image && !audio.paused) { const preload = new Image(); preload.src = image; }
 }
 setInterval(() => {
   if (audio.paused || audio.readyState < 2) return;
@@ -534,21 +549,26 @@ fullscreen.addEventListener('click', async () => {
 document.addEventListener('fullscreenchange', () => {
   setControl(fullscreen, document.fullscreenElement ? 'collapse' : 'expand', document.fullscreenElement ? 'Exit fullscreen' : 'Enter fullscreen');
 });
+let animationFrame = 0, spectrumGradient;
 function draw() {
+  animationFrame = 0;
   const width = canvas.clientWidth, height = canvas.clientHeight;
-  const scale = window.devicePixelRatio || 1;
+  const scale = Math.min(window.devicePixelRatio || 1, 2);
   if (canvas.width !== Math.round(width * scale) || canvas.height !== Math.round(height * scale)) {
     canvas.width = Math.round(width * scale); canvas.height = Math.round(height * scale);
+    spectrumGradient = null;
   }
   ctx.setTransform(scale, 0, 0, scale, 0, 0);
   ctx.clearRect(0, 0, width, height);
   if (analyser) analyser.getByteFrequencyData(frequencies);
   const count = 48, gap = 4, barWidth = (width - (count - 1) * gap) / count;
-  const gradient = ctx.createLinearGradient(0, height, 0, 0);
-  gradient.addColorStop(0, '#0f76bd'); gradient.addColorStop(.55, '#149bd3'); gradient.addColorStop(1, '#00aeef');
+  if (!spectrumGradient) {
+    spectrumGradient = ctx.createLinearGradient(0, height, 0, 0);
+    spectrumGradient.addColorStop(0, '#0f76bd'); spectrumGradient.addColorStop(.55, '#149bd3'); spectrumGradient.addColorStop(1, '#00aeef');
+  }
   const energy = analyser && !audio.paused ? (frequencies[2] + frequencies[4] + frequencies[8]) / (3 * 255) : 0;
   screen.style.setProperty('--energy', energy.toFixed(2));
-  ctx.fillStyle = gradient;
+  ctx.fillStyle = spectrumGradient;
   for (let i = 0; i < count; i++) {
     // Mirror bass at the center, with higher frequencies toward both edges.
     const distance = Math.abs(i - (count - 1) / 2) - .5;
@@ -566,9 +586,17 @@ function draw() {
     const barHeight = Math.max(3, value * (height - 4));
     ctx.fillRect(i * (barWidth + gap), (height - barHeight) / 2, barWidth, barHeight);
   }
-  requestAnimationFrame(draw);
+  if (!audio.paused && !document.hidden) animationFrame = requestAnimationFrame(draw);
 }
-draw();
+function refreshVisualizer() {
+  cancelAnimationFrame(animationFrame);
+  animationFrame = 0;
+  if (!document.hidden) draw();
+}
+for (const event of ['playing', 'pause', 'ended', 'emptied']) audio.addEventListener(event, refreshVisualizer);
+window.addEventListener('resize', refreshVisualizer);
+document.addEventListener('visibilitychange', refreshVisualizer);
+refreshVisualizer();
 const autoplay = document.querySelector('#autoplay');
 let autoplayEnabled = false;
 try { autoplayEnabled = localStorage.getItem('kwest-autoplay') === 'true'; } catch { /* Storage can be disabled. */ }
